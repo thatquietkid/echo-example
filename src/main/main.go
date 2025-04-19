@@ -1,16 +1,18 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
-	"net/http"
 	"io"
 	"log"
-	"encoding/json"
-	"time"
+	"net/http"
 	"strings"
+	"time"
+
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
-	jwt "github.com/dgrijalva/jwt-go"
+	echojwt "github.com/labstack/echo-jwt/v4"
 )
 
 type Cat struct {
@@ -30,7 +32,7 @@ type Hamster struct {
 
 type JwtClaims struct {
 	Name string `json:"name"`
-	jwt.StandardClaims
+	jwt.RegisteredClaims
 }
 
 func hello(c echo.Context) error {
@@ -104,6 +106,14 @@ func mainCookie(c echo.Context) error {
 	return c.String(http.StatusOK, "Welcome to the cookie page!")
 }
 
+func mainJwt(c echo.Context) error {
+	user := c.Get("user").(*jwt.Token)
+	claims := user.Claims.(*JwtClaims)
+
+	log.Println("User Name:", claims.Name, "User ID:", claims.ID)
+	return c.String(http.StatusOK, "you are on the secret JWT page!")
+}
+
 func login(c echo.Context) error {
 	username := c.QueryParam("username")
 	password := c.QueryParam("password")
@@ -130,23 +140,25 @@ func login(c echo.Context) error {
 
 func createJwtToken() (string, error) {
 	claims := JwtClaims{
-		"admin",
-		jwt.StandardClaims{
-			Id:        "main_user_id",
-			ExpiresAt: time.Now().Add(24 * time.Hour).Unix(),
+		Name: "admin",
+		RegisteredClaims: jwt.RegisteredClaims{
+			ID:        "main_user_id",
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(24 * time.Hour)),
+			IssuedAt:  jwt.NewNumericDate(time.Now()),
+			Subject:   "admin_user",
 		},
 	}
-	rawToken := jwt.NewWithClaims(jwt.SigningMethodHS512, claims)
-	token, err := rawToken.SignedString([]byte("mySecret"))
+
+	token := jwt.NewWithClaims(jwt.SigningMethodHS512, claims)
+	signedToken, err := token.SignedString([]byte("mySecret"))
 	if err != nil {
 		return "", err
 	}
-	return token, nil
+	return signedToken, nil
 }
 
-
-//   	MIDDLEWARE SECTION 		//
-func ServerHeader(next echo.HandlerFunc) echo.HandlerFunc{
+// MIDDLEWARE SECTION
+func ServerHeader(next echo.HandlerFunc) echo.HandlerFunc {
 	return func(c echo.Context) error {
 		c.Response().Header().Set(echo.HeaderServer, "Echo Server/1.0")
 		return next(c)
@@ -177,25 +189,38 @@ func main() {
 	e.Use(ServerHeader)
 	adminGroup := e.Group("/admin")
 	cookieGroup := e.Group("/cookie")
+	jwtGroup := e.Group("/jwt")
+	
 	adminGroup.Use(middleware.LoggerWithConfig(middleware.LoggerConfig{
 		Format: `${time_rfc3339} ${status} ${method} ${host}${path} ${latency_human}` + "\n",
 	}))
 
-	// Define the basic authentication middleware with the correct function signature
+	// Basic authentication middleware
 	adminGroup.Use(middleware.BasicAuth(func(username, password string, c echo.Context) (bool, error) {
-		// Check if the username and password are correct
 		if username == "admin" && password == "1234" {
-			return true, nil // Return true for successful authentication
+			return true, nil
 		}
-		return false, nil // Return false for failed authentication (no error)
+		return false, nil
 	}))
+	
+	// JWT middleware configuration
+	jwtConfig := echojwt.Config{
+		SigningKey:  []byte("mySecret"),
+		SigningMethod: "HS512",
+		NewClaimsFunc: func(c echo.Context) jwt.Claims {
+			return new(JwtClaims)
+		},
+	}
+	jwtGroup.Use(echojwt.WithConfig(jwtConfig))
+	
 	cookieGroup.Use(checkCookie)
 	cookieGroup.GET("/main", mainCookie)
 
-	adminGroup.GET("/main",mainAdmin)
+	adminGroup.GET("/main", mainAdmin)
+	jwtGroup.GET("/main", mainJwt)
 	e.GET("/login", login)
 	e.GET("/", hello)
-	e.GET("/cats/:data",getCats)
+	e.GET("/cats/:data", getCats)
 	e.POST("/cats", addCat)
 	e.POST("/dogs", addDog)
 	e.POST("/hamsters", addHamster)
